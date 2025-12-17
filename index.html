@@ -1,8 +1,34 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, FileVideo, Camera, FileText, CheckCircle, AlertCircle, Download, Play, Cpu, Key, Image as ImageIcon, Video, Settings, RefreshCw, Wifi, ShieldCheck, Eye, Database, Server, FileChartColumn, Edit3, Save, Trash2, Lock, LogOut } from 'lucide-react';
+import { Upload, FileVideo, Camera, FileText, CheckCircle, AlertCircle, Download, Play, Cpu, Key, Image as ImageIcon, Video, Settings, RefreshCw, Wifi, ShieldCheck, Eye, Database, Server, FileChartColumn, Edit3, Save, Trash2, Lock, LogOut, History, Cloud } from 'lucide-react';
+
+// --- FIREBASE IMPORTS ---
+// In a real project, run: npm install firebase
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, addDoc, query, where, orderBy, getDocs, deleteDoc, doc } from 'firebase/firestore';
+
+// --- FIREBASE CONFIGURATION (SAFE TO COMMIT) ---
+// Replace these placeholders with your actual config from the Firebase Console.
+// It is SAFE to have this in a public GitHub repo because you will set Security Rules in the Firebase Console.
+const firebaseConfig = {
+  apiKey: "YOUR_FIREBASE_API_KEY_HERE",
+  authDomain: "your-project.firebaseapp.com",
+  projectId: "your-project-id",
+  storageBucket: "your-project.appspot.com",
+  messagingSenderId: "123456789",
+  appId: "1:123456789:web:abcdef"
+};
+
+// Initialize Firebase (Conditional to prevent crashes if config is empty)
+let db, auth;
+if (firebaseConfig.projectId !== "your-project-id") {
+  const app = initializeApp(firebaseConfig);
+  db = getFirestore(app);
+  auth = getAuth(app);
+}
 
 export default function SiteWalkEnterprise() {
-  // 1. SECURITY FIX: Removed hardcoded key. Initialize from LocalStorage.
+  // 1. SECURITY FIX: Removed hardcoded Gemini key. Initialize from LocalStorage.
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('site_walk_api_key') || '');
   const [showLogin, setShowLogin] = useState(!localStorage.getItem('site_walk_api_key'));
   
@@ -15,7 +41,7 @@ export default function SiteWalkEnterprise() {
   // Media
   const [videoFile, setVideoFile] = useState(null);
   const [videoUrl, setVideoUrl] = useState(null);
-  const [logoUrl, setLogoUrl] = useState(() => localStorage.getItem('site_walk_logo') || null); // Persist Logo too
+  const [logoUrl, setLogoUrl] = useState(() => localStorage.getItem('site_walk_logo') || null);
   
   // Process
   const [isProcessing, setIsProcessing] = useState(false);
@@ -27,6 +53,11 @@ export default function SiteWalkEnterprise() {
   const [isEditing, setIsEditing] = useState(false);
   const [pdfReady, setPdfReady] = useState(false);
   
+  // Firebase State
+  const [user, setUser] = useState(null);
+  const [historyItems, setHistoryItems] = useState([]);
+  const [activeTab, setActiveTab] = useState('new'); // 'new' or 'history'
+  
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
 
@@ -34,6 +65,7 @@ export default function SiteWalkEnterprise() {
   useEffect(() => {
     if (apiKey && !showLogin) fetchModels();
     
+    // PDF Engine
     if (!window.jspdf) {
       const script = document.createElement('script');
       script.src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
@@ -42,9 +74,21 @@ export default function SiteWalkEnterprise() {
     } else {
       setPdfReady(true);
     }
+
+    // Firebase Auth Listener
+    if (auth) {
+        // Sign in anonymously to enable database access
+        signInAnonymously(auth).catch((error) => console.error("Auth Error", error));
+        
+        const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+            setUser(currentUser);
+            if (currentUser) fetchHistory(currentUser.uid);
+        });
+        return () => unsubscribe();
+    }
   }, [apiKey, showLogin]);
 
-  // --- Auth Handlers ---
+  // --- Auth Handlers (Gemini) ---
   const handleLogin = (e) => {
       e.preventDefault();
       const inputKey = e.target.keyInput.value.trim();
@@ -62,6 +106,58 @@ export default function SiteWalkEnterprise() {
       setApiKey('');
       setShowLogin(true);
       setAvailableModels([]);
+  };
+
+  // --- Firebase Functions ---
+  const saveReportToHistory = async () => {
+      if (!db || !user || !reportData) return;
+      
+      try {
+          addLog("Saving report to cloud history...", 'info');
+          // We save the JSON data. Images would ideally go to Firebase Storage, but for simplicity
+          // we are storing the analysis text. Storing base64 images in Firestore is not recommended for production.
+          // For this demo, we'll store the text data and a summary.
+          const docRef = await addDoc(collection(db, "reports"), {
+              userId: user.uid,
+              projectName: reportData.projectName,
+              date: new Date().toISOString(),
+              summary: reportData.summary,
+              transcript: reportData.transcript,
+              itemCount: reportData.captures.length,
+              // Note: We strip images to keep document size low for this demo
+              captures: reportData.captures.map(({image, ...rest}) => rest) 
+          });
+          addLog("Report saved to history!", 'success');
+          fetchHistory(user.uid);
+      } catch (e) {
+          console.error("Error adding document: ", e);
+          addLog(`Cloud Save Error: ${e.message}`, 'error');
+      }
+  };
+
+  const fetchHistory = async (uid) => {
+      if (!db) return;
+      try {
+          const q = query(collection(db, "reports"), where("userId", "==", uid), orderBy("date", "desc"));
+          const querySnapshot = await getDocs(q);
+          const items = [];
+          querySnapshot.forEach((doc) => {
+              items.push({ id: doc.id, ...doc.data() });
+          });
+          setHistoryItems(items);
+      } catch (e) {
+          console.error("Error fetching history: ", e);
+      }
+  };
+
+  const deleteHistoryItem = async (id) => {
+      if (!db) return;
+      try {
+          await deleteDoc(doc(db, "reports", id));
+          setHistoryItems(prev => prev.filter(item => item.id !== id));
+      } catch (e) {
+          console.error("Error deleting: ", e);
+      }
   };
 
   const fetchModels = async () => {
@@ -98,7 +194,6 @@ export default function SiteWalkEnterprise() {
       console.error(error);
       setConnectionStatus('error');
       addLog(`Auth Error: ${error.message}`);
-      // Fallback
       setAvailableModels(['gemini-1.5-flash', 'gemini-1.5-pro']);
       setSelectedModel('gemini-1.5-flash');
     } finally {
@@ -110,7 +205,6 @@ export default function SiteWalkEnterprise() {
     setLogs(prev => [...prev, { msg, type, timestamp: new Date().toLocaleTimeString() }]);
   };
 
-  // --- File Handling ---
   const handleFileUpload = (event) => {
     const file = event.target.files[0];
     if (!file) return;
@@ -118,7 +212,6 @@ export default function SiteWalkEnterprise() {
     setLogs([]); 
     addLog(`Video Selected: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
 
-    // File API allows larger files, keep explicit check just in case browser crashes
     if (file.size > 2 * 1024 * 1024 * 1024) {
       alert("File exceeds 2GB API limit.");
       return;
@@ -137,7 +230,7 @@ export default function SiteWalkEnterprise() {
       reader.onload = (e) => {
           const result = e.target.result;
           setLogoUrl(result);
-          localStorage.setItem('site_walk_logo', result); // Persist logo
+          localStorage.setItem('site_walk_logo', result);
       };
       reader.readAsDataURL(file);
     }
@@ -148,7 +241,6 @@ export default function SiteWalkEnterprise() {
       localStorage.removeItem('site_walk_logo');
   };
 
-  // --- Processing Logic ---
   const uploadLargeFileToGemini = async (file) => {
     const displayName = file.name;
     const numBytes = file.size;
@@ -278,7 +370,7 @@ export default function SiteWalkEnterprise() {
         setProgress(60 + Math.floor((i / totalEvents) * 30));
       }
 
-      setReportData({
+      const newReport = {
         projectName: "Site Inspection 001",
         fileName: videoFile.name,
         date: new Date().toLocaleDateString(),
@@ -286,7 +378,9 @@ export default function SiteWalkEnterprise() {
         transcript: aiResult.transcript,
         summary: aiResult.summary,
         usedModel: selectedModel
-      });
+      };
+
+      setReportData(newReport);
       
       setProgress(100);
       addLog("Done.", 'success');
@@ -320,7 +414,6 @@ export default function SiteWalkEnterprise() {
     });
   };
 
-  // --- Report Actions ---
   const updateCapture = (id, field, value) => {
     setReportData(prev => ({
       ...prev,
@@ -481,6 +574,23 @@ export default function SiteWalkEnterprise() {
                  {connectionStatus === 'success' && <Wifi className="w-3 h-3" />}
                  <span className="uppercase font-bold tracking-wider">{connectionStatus === 'success' ? 'API Connected' : 'Checking API...'}</span>
               </div>
+              
+              {/* Tabs */}
+              <div className="flex gap-1 bg-stone-800 p-1 rounded-lg">
+                  <button 
+                    onClick={() => setActiveTab('new')}
+                    className={`px-3 py-1 rounded text-xs font-bold transition-colors ${activeTab === 'new' ? 'bg-stone-600 text-white' : 'text-stone-400 hover:text-white'}`}
+                  >
+                      New Report
+                  </button>
+                  <button 
+                    onClick={() => setActiveTab('history')}
+                    className={`px-3 py-1 rounded text-xs font-bold transition-colors ${activeTab === 'history' ? 'bg-stone-600 text-white' : 'text-stone-400 hover:text-white'}`}
+                  >
+                      History
+                  </button>
+              </div>
+
               <button onClick={handleLogout} className="text-stone-400 hover:text-white transition-colors" title="Logout">
                   <LogOut className="w-5 h-5" />
               </button>
@@ -488,185 +598,265 @@ export default function SiteWalkEnterprise() {
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto p-4 lg:p-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
-        {/* LEFT: Config */}
-        <div className="lg:col-span-4 space-y-6">
-          <div className="bg-white p-5 rounded-xl shadow-sm border border-stone-200">
-            <h2 className="text-sm font-bold uppercase tracking-wider text-stone-500 mb-3 flex items-center gap-2">
-              <Settings className="w-4 h-4" /> Report Config
-            </h2>
-            <div className="space-y-4">
-               {/* Model Select */}
-               <div className="relative">
-                 <label className="text-xs font-bold text-stone-400">AI Model</label>
-                 <select 
-                   value={selectedModel}
-                   onChange={(e) => setSelectedModel(e.target.value)}
-                   disabled={isLoadingModels}
-                   className="w-full p-2 bg-stone-50 border border-stone-300 rounded text-sm mt-1"
-                 >
-                   {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
-                 </select>
-               </div>
-               
-               {/* Logo Upload (Persisted) */}
-               <div>
-                 <label className="text-xs font-bold text-stone-400">Company Logo (For PDF)</label>
-                 <div className="mt-1 flex items-center gap-3">
-                    {logoUrl ? (
-                        <div className="h-10 w-10 relative">
-                            <img src={logoUrl} className="h-full w-full object-contain border rounded" />
-                            <button onClick={handleRemoveLogo} className="absolute -top-1 -right-1 bg-red-500 text-white rounded-full p-0.5"><Trash2 className="w-2 h-2" /></button>
+      <main className="max-w-6xl mx-auto p-4 lg:p-8">
+        
+        {/* HISTORY VIEW */}
+        {activeTab === 'history' && (
+            <div className="bg-white rounded-xl shadow-lg border border-stone-200 overflow-hidden">
+                <div className="p-6 border-b border-stone-200 bg-stone-50 flex justify-between items-center">
+                    <div>
+                        <h2 className="text-xl font-bold text-stone-900">Inspection History</h2>
+                        <p className="text-xs text-stone-500 mt-1">
+                            {user ? `Logged in as: Anonymous User (${user.uid.slice(0,6)}...)` : "Connecting to History..."}
+                        </p>
+                    </div>
+                    <button 
+                        onClick={() => user && fetchHistory(user.uid)}
+                        className="p-2 text-stone-500 hover:text-stone-900 hover:bg-stone-200 rounded-full transition-colors"
+                    >
+                        <RefreshCw className="w-4 h-4" />
+                    </button>
+                </div>
+                
+                {(!firebaseConfig.projectId || firebaseConfig.projectId === "your-project-id") && (
+                    <div className="p-6 bg-orange-50 border-b border-orange-100 text-orange-800 text-sm">
+                        <strong>Configuration Required:</strong> You must update the <code>firebaseConfig</code> object in the code with your own project details to enable history saving.
+                    </div>
+                )}
+
+                <div className="divide-y divide-stone-100">
+                    {historyItems.length === 0 ? (
+                        <div className="p-12 text-center text-stone-400 flex flex-col items-center">
+                            <History className="w-12 h-12 mb-3 opacity-20" />
+                            <p>No saved reports found.</p>
                         </div>
                     ) : (
-                        <label className="flex items-center justify-center h-10 px-4 border border-dashed border-stone-300 rounded cursor-pointer hover:bg-stone-50 text-xs text-stone-500">
-                            <Upload className="w-3 h-3 mr-2" /> Upload PNG/JPG
-                            <input type="file" className="hidden" accept="image/*" onChange={handleLogoUpload} />
-                        </label>
+                        historyItems.map((item) => (
+                            <div key={item.id} className="p-4 hover:bg-stone-50 transition-colors flex justify-between items-center group">
+                                <div>
+                                    <h3 className="font-bold text-stone-800">{item.projectName || "Untitled Inspection"}</h3>
+                                    <div className="flex gap-3 text-xs text-stone-500 mt-1">
+                                        <span className="flex items-center gap-1"><Database className="w-3 h-3" /> {new Date(item.date).toLocaleDateString()}</span>
+                                        <span className="flex items-center gap-1"><Camera className="w-3 h-3" /> {item.itemCount} Observations</span>
+                                    </div>
+                                    <p className="text-xs text-stone-600 mt-2 line-clamp-1 max-w-xl">{item.summary}</p>
+                                </div>
+                                <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                    <button 
+                                        onClick={() => { setReportData(item); setActiveTab('new'); }}
+                                        className="text-xs bg-stone-100 hover:bg-stone-200 text-stone-700 px-3 py-2 rounded font-medium border border-stone-300"
+                                    >
+                                        Load
+                                    </button>
+                                    <button 
+                                        onClick={() => deleteHistoryItem(item.id)}
+                                        className="text-red-400 hover:text-red-600 p-2 rounded hover:bg-red-50"
+                                    >
+                                        <Trash2 className="w-4 h-4" />
+                                    </button>
+                                </div>
+                            </div>
+                        ))
                     )}
-                 </div>
-               </div>
+                </div>
             </div>
-          </div>
+        )}
 
-          <div className="bg-white p-5 rounded-xl shadow-sm border border-stone-200">
-            <h2 className="text-sm font-bold uppercase tracking-wider text-stone-500 mb-3 flex items-center gap-2"><FileVideo className="w-4 h-4" /> Video Input</h2>
-            {!videoUrl ? (
-              <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-stone-300 rounded-xl cursor-pointer hover:bg-stone-50 transition-all">
-                <div className="flex flex-col items-center justify-center pt-5 pb-6">
-                  <Upload className="w-6 h-6 text-stone-400 mb-2" />
-                  <p className="text-sm text-stone-600">Upload Walkthrough</p>
-                  <p className="text-xs text-stone-400 mt-1">(Up to 2GB)</p>
-                </div>
-                <input type="file" className="hidden" accept="video/*" onChange={handleFileUpload} />
-              </label>
-            ) : (
-              <div className="space-y-4">
-                <div className="relative rounded-lg overflow-hidden bg-black aspect-video shadow-md">
-                  <video ref={videoRef} src={videoUrl} className="w-full h-full object-contain" controls playsInline />
-                  <canvas ref={canvasRef} className="hidden" />
-                </div>
-                <div className="grid grid-cols-1 gap-2">
-                    <button onClick={processVideo} disabled={isProcessing} className={`w-full py-3 rounded-lg font-bold shadow-md flex items-center justify-center gap-2 transition-all ${isProcessing ? 'bg-stone-200 text-stone-400 cursor-wait' : 'bg-orange-600 hover:bg-orange-700 text-white hover:shadow-lg'}`}>
-                    {isProcessing ? ( <> <Cpu className="w-4 h-4 animate-spin" /> Processing... </> ) : ( <> <Play className="w-4 h-4 fill-current" /> Analyze Video </> )}
-                    </button>
-                    <button onClick={() => { setVideoUrl(null); setReportData(null); }} className="text-xs text-red-500 hover:text-red-700 py-1">Remove Video</button>
-                </div>
-              </div>
-            )}
-          </div>
-          
-          <div className="bg-stone-900 p-4 rounded-xl shadow-inner border border-stone-800 text-stone-300 font-mono text-xs h-48 flex flex-col">
-            <div className="flex-1 overflow-y-auto space-y-1 custom-scrollbar">
-              {logs.length === 0 ? ( <span className="text-stone-600 italic">Logs...</span> ) : ( logs.map((log, i) => ( <div key={i} className="flex gap-2"> <span className="text-stone-600 shrink-0">[{log.timestamp}]</span> <span className={log.type === 'error' ? "text-red-400" : log.type === 'success' ? "text-green-400" : "text-stone-300"}>{log.msg}</span> </div> )) )}
-            </div>
-          </div>
-        </div>
+        {/* NEW REPORT VIEW (Existing Grid) */}
+        {activeTab === 'new' && (
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+                {/* LEFT: Config (Same as before) */}
+                <div className="lg:col-span-4 space-y-6">
+                  {/* ... Config Panels ... */}
+                  <div className="bg-white p-5 rounded-xl shadow-sm border border-stone-200">
+                    <h2 className="text-sm font-bold uppercase tracking-wider text-stone-500 mb-3 flex items-center gap-2">
+                      <Settings className="w-4 h-4" /> Report Config
+                    </h2>
+                    <div className="space-y-4">
+                       <div className="relative">
+                         <label className="text-xs font-bold text-stone-400">AI Model</label>
+                         <select 
+                           value={selectedModel}
+                           onChange={(e) => setSelectedModel(e.target.value)}
+                           disabled={isLoadingModels}
+                           className="w-full p-2 bg-stone-50 border border-stone-300 rounded text-sm mt-1"
+                         >
+                           {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
+                         </select>
+                       </div>
+                       <div>
+                         <label className="text-xs font-bold text-stone-400">Company Logo (For PDF)</label>
+                         <div className="mt-1 flex items-center gap-3">
+                            {logoUrl ? (
+                                <div className="h-10 w-10 relative">
+                                    <img src={logoUrl} className="h-full w-full object-contain border rounded" />
+                                    <button onClick={handleRemoveLogo} className="absolute -top-1 -right-1 bg-red-500 text-white rounded-full p-0.5"><Trash2 className="w-2 h-2" /></button>
+                                </div>
+                            ) : (
+                                <label className="flex items-center justify-center h-10 px-4 border border-dashed border-stone-300 rounded cursor-pointer hover:bg-stone-50 text-xs text-stone-500">
+                                    <Upload className="w-3 h-3 mr-2" /> Upload PNG/JPG
+                                    <input type="file" className="hidden" accept="image/*" onChange={handleLogoUpload} />
+                                </label>
+                            )}
+                         </div>
+                       </div>
+                    </div>
+                  </div>
 
-        {/* RIGHT: Results & Editor */}
-        <div className="lg:col-span-8 flex flex-col h-full">
-          {!reportData ? (
-            <div className="flex-1 flex flex-col items-center justify-center bg-white/50 border-2 border-dashed border-stone-200 rounded-2xl min-h-[400px]">
-              <ImageIcon className="w-8 h-8 text-stone-300 mb-4" />
-              <h3 className="text-stone-900 font-semibold text-lg">Ready to Analyze</h3>
-              <p className="text-stone-500 max-w-sm text-center mt-2 text-sm">Secure Environment.<br/>Upload video to begin analysis.</p>
-            </div>
-          ) : (
-            <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-               <div className="bg-white rounded-xl shadow-lg border border-stone-200 overflow-hidden mb-6">
-                  {/* Toolbar */}
-                  <div className="bg-stone-50 border-b border-stone-200 p-4 flex justify-between items-center sticky top-0 z-10">
-                    <div>
-                      <h2 className="text-lg font-bold text-stone-900">Inspection Report</h2>
-                      <div className="text-xs text-stone-500">{reportData.captures.length} Items Detected</div>
-                    </div>
-                    <div className="flex gap-2">
-                        <button 
-                          onClick={() => setIsEditing(!isEditing)}
-                          className={`flex items-center gap-2 px-3 py-2 rounded text-sm transition-colors border ${isEditing ? 'bg-orange-100 border-orange-200 text-orange-800' : 'bg-white border-stone-300 text-stone-700 hover:bg-stone-50'}`}
-                        >
-                          {isEditing ? <Save className="w-4 h-4" /> : <Edit3 className="w-4 h-4" />}
-                          {isEditing ? "Finish Editing" : "Edit Report"}
-                        </button>
-                        <button onClick={generatePDF} className="flex items-center gap-2 bg-stone-800 hover:bg-stone-700 text-white px-3 py-2 rounded text-sm transition-colors"> <Download className="w-4 h-4" /> Download PDF </button>
-                    </div>
+                  <div className="bg-white p-5 rounded-xl shadow-sm border border-stone-200">
+                    <h2 className="text-sm font-bold uppercase tracking-wider text-stone-500 mb-3 flex items-center gap-2"><FileVideo className="w-4 h-4" /> Video Input</h2>
+                    {!videoUrl ? (
+                      <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-stone-300 rounded-xl cursor-pointer hover:bg-stone-50 transition-all">
+                        <div className="flex flex-col items-center justify-center pt-5 pb-6">
+                          <Upload className="w-6 h-6 text-stone-400 mb-2" />
+                          <p className="text-sm text-stone-600">Upload Walkthrough</p>
+                          <p className="text-xs text-stone-400 mt-1">(Up to 2GB)</p>
+                        </div>
+                        <input type="file" className="hidden" accept="video/*" onChange={handleFileUpload} />
+                      </label>
+                    ) : (
+                      <div className="space-y-4">
+                        <div className="relative rounded-lg overflow-hidden bg-black aspect-video shadow-md">
+                          <video ref={videoRef} src={videoUrl} className="w-full h-full object-contain" controls playsInline />
+                          <canvas ref={canvasRef} className="hidden" />
+                        </div>
+                        <div className="grid grid-cols-1 gap-2">
+                            <button onClick={processVideo} disabled={isProcessing} className={`w-full py-3 rounded-lg font-bold shadow-md flex items-center justify-center gap-2 transition-all ${isProcessing ? 'bg-stone-200 text-stone-400 cursor-wait' : 'bg-orange-600 hover:bg-orange-700 text-white hover:shadow-lg'}`}>
+                            {isProcessing ? ( <> <Cpu className="w-4 h-4 animate-spin" /> Processing... </> ) : ( <> <Play className="w-4 h-4 fill-current" /> Analyze Video </> )}
+                            </button>
+                            <button onClick={() => { setVideoUrl(null); setReportData(null); }} className="text-xs text-red-500 hover:text-red-700 py-1">Remove Video</button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                   
-                  {/* Summary Block */}
-                  <div className="p-6 bg-blue-50/50 border-b border-stone-200">
-                     <div className="flex items-center gap-2 mb-3">
-                        <FileChartColumn className="w-4 h-4 text-blue-600" />
-                        <h3 className="text-sm font-bold uppercase tracking-wider text-blue-900">Executive Summary</h3>
-                     </div>
-                     {isEditing ? (
-                        <textarea 
-                            value={reportData.summary}
-                            onChange={(e) => setReportData({...reportData, summary: e.target.value})}
-                            className="w-full h-32 p-3 text-sm border border-blue-200 rounded focus:ring-2 focus:ring-blue-500 outline-none"
-                        />
-                     ) : (
-                        <p className="text-sm text-stone-700 leading-relaxed font-serif border-l-2 border-blue-200 pl-4 whitespace-pre-wrap">{reportData.summary}</p>
-                     )}
+                  <div className="bg-stone-900 p-4 rounded-xl shadow-inner border border-stone-800 text-stone-300 font-mono text-xs h-48 flex flex-col">
+                    <div className="flex-1 overflow-y-auto space-y-1 custom-scrollbar">
+                      {logs.length === 0 ? ( <span className="text-stone-600 italic">Logs...</span> ) : ( logs.map((log, i) => ( <div key={i} className="flex gap-2"> <span className="text-stone-600 shrink-0">[{log.timestamp}]</span> <span className={log.type === 'error' ? "text-red-400" : log.type === 'success' ? "text-green-400" : "text-stone-300"}>{log.msg}</span> </div> )) )}
+                    </div>
                   </div>
+                </div>
 
-                  {/* Captures Grid */}
-                  <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4 bg-stone-100">
-                     {reportData.captures.map((capture) => (
-                        <div key={capture.id} className={`bg-white rounded shadow-sm overflow-hidden border ${isEditing ? 'border-orange-200' : 'border-stone-200'}`}>
-                           <div className="relative aspect-video bg-black">
-                              <img src={capture.image} className="w-full h-full object-contain" />
-                              <div className="absolute bottom-2 right-2 bg-black/70 text-white text-xs px-2 py-1 rounded">{capture.displayTime}</div>
-                              {isEditing && (
+                {/* RIGHT: Results & Editor */}
+                <div className="lg:col-span-8 flex flex-col h-full">
+                  {!reportData ? (
+                    <div className="flex-1 flex flex-col items-center justify-center bg-white/50 border-2 border-dashed border-stone-200 rounded-2xl min-h-[400px]">
+                      <ImageIcon className="w-8 h-8 text-stone-300 mb-4" />
+                      <h3 className="text-stone-900 font-semibold text-lg">Ready to Analyze</h3>
+                      <p className="text-stone-500 max-w-sm text-center mt-2 text-sm">Secure Environment.<br/>Upload video to begin analysis.</p>
+                    </div>
+                  ) : (
+                    <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+                       <div className="bg-white rounded-xl shadow-lg border border-stone-200 overflow-hidden mb-6">
+                          {/* Toolbar */}
+                          <div className="bg-stone-50 border-b border-stone-200 p-4 flex justify-between items-center sticky top-0 z-10">
+                            <div>
+                              <h2 className="text-lg font-bold text-stone-900">Inspection Report</h2>
+                              <div className="text-xs text-stone-500">{reportData.captures.length} Items Detected</div>
+                            </div>
+                            <div className="flex gap-2">
+                                {/* SAVE TO CLOUD BUTTON */}
                                 <button 
-                                    onClick={() => removeCapture(capture.id)}
-                                    className="absolute top-2 right-2 bg-red-600 text-white p-1 rounded hover:bg-red-700"
+                                  onClick={saveReportToHistory}
+                                  className="flex items-center gap-2 px-3 py-2 rounded text-sm transition-colors border bg-white border-stone-300 text-stone-700 hover:bg-stone-50"
+                                  title="Save to History"
                                 >
-                                    <Trash2 className="w-3 h-3" />
+                                  <Cloud className="w-4 h-4" /> Save
                                 </button>
-                              )}
-                           </div>
-                           <div className="p-3 space-y-2">
-                              <div className="flex justify-between items-center">
-                                <div className="font-bold text-sm text-stone-800">Observation #{capture.id + 1}</div>
-                                {isEditing && (
-                                    <select 
-                                        value={capture.severity}
-                                        onChange={(e) => updateCapture(capture.id, 'severity', e.target.value)}
-                                        className="text-xs border rounded p-1"
-                                    >
-                                        <option value="low">Low Severity</option>
-                                        <option value="medium">Medium Severity</option>
-                                        <option value="high">High Severity</option>
-                                    </select>
-                                )}
-                                {!isEditing && (
-                                    <span className={`text-[10px] px-2 py-0.5 rounded uppercase font-bold ${
-                                        capture.severity === 'high' ? 'bg-red-100 text-red-700' : 
-                                        capture.severity === 'medium' ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'
-                                    }`}>
-                                        {capture.severity}
-                                    </span>
-                                )}
-                              </div>
-                              
-                              {isEditing ? (
+
+                                <button 
+                                  onClick={() => setIsEditing(!isEditing)}
+                                  className={`flex items-center gap-2 px-3 py-2 rounded text-sm transition-colors border ${isEditing ? 'bg-orange-100 border-orange-200 text-orange-800' : 'bg-white border-stone-300 text-stone-700 hover:bg-stone-50'}`}
+                                >
+                                  {isEditing ? <Save className="w-4 h-4" /> : <Edit3 className="w-4 h-4" />}
+                                  {isEditing ? "Finish Editing" : "Edit Report"}
+                                </button>
+                                <button onClick={generatePDF} className="flex items-center gap-2 bg-stone-800 hover:bg-stone-700 text-white px-3 py-2 rounded text-sm transition-colors"> <Download className="w-4 h-4" /> Download PDF </button>
+                            </div>
+                          </div>
+                          
+                          {/* Summary Block */}
+                          <div className="p-6 bg-blue-50/50 border-b border-stone-200">
+                             <div className="flex items-center gap-2 mb-3">
+                                <FileChartColumn className="w-4 h-4 text-blue-600" />
+                                <h3 className="text-sm font-bold uppercase tracking-wider text-blue-900">Executive Summary</h3>
+                             </div>
+                             {isEditing ? (
                                 <textarea 
-                                    value={capture.context}
-                                    onChange={(e) => updateCapture(capture.id, 'context', e.target.value)}
-                                    className="w-full text-xs p-2 border rounded"
-                                    rows={3}
+                                    value={reportData.summary}
+                                    onChange={(e) => setReportData({...reportData, summary: e.target.value})}
+                                    className="w-full h-32 p-3 text-sm border border-blue-200 rounded focus:ring-2 focus:ring-blue-500 outline-none"
                                 />
-                              ) : (
-                                <div className="text-xs text-stone-600 italic">{capture.context}</div>
-                              )}
-                           </div>
-                        </div>
-                     ))}
-                  </div>
-               </div>
+                             ) : (
+                                <p className="text-sm text-stone-700 leading-relaxed font-serif border-l-2 border-blue-200 pl-4 whitespace-pre-wrap">{reportData.summary}</p>
+                             )}
+                          </div>
+
+                          {/* Captures Grid */}
+                          <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4 bg-stone-100">
+                             {reportData.captures.map((capture) => (
+                                <div key={capture.id} className={`bg-white rounded shadow-sm overflow-hidden border ${isEditing ? 'border-orange-200' : 'border-stone-200'}`}>
+                                   <div className="relative aspect-video bg-black">
+                                      {/* Note: In History view, we won't have the image blob unless re-processing or storing in Storage (advanced) */}
+                                      {capture.image ? (
+                                          <img src={capture.image} className="w-full h-full object-contain" />
+                                      ) : (
+                                          <div className="w-full h-full flex items-center justify-center text-stone-500 text-xs">Image not saved in history</div>
+                                      )}
+                                      <div className="absolute bottom-2 right-2 bg-black/70 text-white text-xs px-2 py-1 rounded">{capture.displayTime}</div>
+                                      {isEditing && (
+                                        <button 
+                                            onClick={() => removeCapture(capture.id)}
+                                            className="absolute top-2 right-2 bg-red-600 text-white p-1 rounded hover:bg-red-700"
+                                        >
+                                            <Trash2 className="w-3 h-3" />
+                                        </button>
+                                      )}
+                                   </div>
+                                   <div className="p-3 space-y-2">
+                                      <div className="flex justify-between items-center">
+                                        <div className="font-bold text-sm text-stone-800">Observation #{capture.id + 1}</div>
+                                        {isEditing && (
+                                            <select 
+                                                value={capture.severity}
+                                                onChange={(e) => updateCapture(capture.id, 'severity', e.target.value)}
+                                                className="text-xs border rounded p-1"
+                                            >
+                                                <option value="low">Low Severity</option>
+                                                <option value="medium">Medium Severity</option>
+                                                <option value="high">High Severity</option>
+                                            </select>
+                                        )}
+                                        {!isEditing && (
+                                            <span className={`text-[10px] px-2 py-0.5 rounded uppercase font-bold ${
+                                                capture.severity === 'high' ? 'bg-red-100 text-red-700' : 
+                                                capture.severity === 'medium' ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'
+                                            }`}>
+                                                {capture.severity}
+                                            </span>
+                                        )}
+                                      </div>
+                                      
+                                      {isEditing ? (
+                                        <textarea 
+                                            value={capture.context}
+                                            onChange={(e) => updateCapture(capture.id, 'context', e.target.value)}
+                                            className="w-full text-xs p-2 border rounded"
+                                            rows={3}
+                                        />
+                                      ) : (
+                                        <div className="text-xs text-stone-600 italic">{capture.context}</div>
+                                      )}
+                                   </div>
+                                </div>
+                             ))}
+                          </div>
+                       </div>
+                    </div>
+                  )}
+                </div>
             </div>
-          )}
-        </div>
+        )}
       </main>
     </div>
   );
