@@ -3,10 +3,11 @@ import {
   Upload, FileVideo, Camera, FileText, CheckCircle, AlertCircle, Download, 
   Play, Cpu, Key, Image as ImageIcon, Video, Settings, RefreshCw, Wifi, 
   ShieldCheck, Eye, Database, Server, FileChartColumn, Edit3, Save, 
-  Trash2, Lock, LogOut, History, Cloud, X
+  Trash2, Lock, LogOut, History, Cloud, X, WifiOff
 } from 'lucide-react';
 
 // --- FIREBASE IMPORTS ---
+// Note: If running locally/GitHub, ensure 'firebase' is installed: npm install firebase
 import { initializeApp } from 'firebase/app';
 import { 
   getAuth, 
@@ -24,8 +25,8 @@ import {
 } from 'firebase/firestore';
 
 // --- FIREBASE INITIALIZATION ---
-// We prioritize the environment config for immediate functionality, 
-// falling back to placeholders for external usage.
+// We prioritize the environment config for immediate functionality.
+// If not found, we return null to trigger "Offline Mode" rather than crashing with invalid keys.
 const getFirebaseConfig = () => {
   try {
     if (typeof __firebase_config !== 'undefined') {
@@ -34,20 +35,38 @@ const getFirebaseConfig = () => {
   } catch (e) {
     console.warn("Environment config parse error", e);
   }
+  
+  // Return null if no valid config is found in the environment.
+  // To enable Firebase in a GitHub/Standalone build, replace null with your config object below:
+  /*
   return {
-    apiKey: "YOUR_API_KEY",
-    authDomain: "project-id.firebaseapp.com",
-    projectId: "project-id",
-    storageBucket: "project-id.appspot.com",
-    messagingSenderId: "123456789",
-    appId: "1:123456789:web:abcdef"
+    apiKey: "YOUR_REAL_API_KEY",
+    authDomain: "your-project.firebaseapp.com",
+    projectId: "your-project-id",
+    storageBucket: "your-project.appspot.com",
+    messagingSenderId: "...",
+    appId: "..."
   };
+  */
+  return null;
 };
 
 const firebaseConfig = getFirebaseConfig();
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
+
+// Initialize Firebase only if config is present
+let app = null;
+let auth = null;
+let db = null;
+
+if (firebaseConfig) {
+  try {
+    app = initializeApp(firebaseConfig);
+    auth = getAuth(app);
+    db = getFirestore(app);
+  } catch (e) {
+    console.error("Firebase init failed:", e);
+  }
+}
 
 // Use a unique app ID for data segregation in the shared environment
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'site-walk-default';
@@ -92,8 +111,14 @@ export default function SiteWalkEnterprise() {
 
   // --- EFFECT: INITIALIZATION ---
   useEffect(() => {
-    // 1. Initialize Firebase Auth
+    // 1. Initialize Firebase Auth (Safe Mode)
     const initAuth = async () => {
+      if (!auth) {
+        console.warn("Running in Offline Mode (No Firebase Config detected)");
+        setIsFirebaseReady(false);
+        return;
+      }
+
       try {
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
           await signInWithCustomToken(auth, __initial_auth_token);
@@ -104,17 +129,21 @@ export default function SiteWalkEnterprise() {
       } catch (error) {
         console.error("Auth initialization failed:", error);
         notify("Database connection failed. Offline mode active.", "error");
+        setIsFirebaseReady(false);
       }
     };
 
     initAuth();
 
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-      if (currentUser) {
-        fetchHistory(currentUser.uid);
-      }
-    });
+    let unsubscribe = () => {};
+    if (auth) {
+        unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+            setUser(currentUser);
+            if (currentUser) {
+                fetchHistory(currentUser.uid);
+            }
+        });
+    }
 
     // 2. Load PDF Engine
     if (!window.jspdf) {
@@ -145,7 +174,7 @@ export default function SiteWalkEnterprise() {
   // --- FIREBASE DATA OPERATIONS ---
   const saveReportToHistory = async () => {
     if (!db || !user || !reportData) {
-      notify("Cannot save: Database not connected or no report generated.", "error");
+      notify("Offline Mode: Cloud save is unavailable.", "error");
       return;
     }
     
@@ -701,18 +730,24 @@ export default function SiteWalkEnterprise() {
                     <div>
                         <h2 className="text-xl font-bold text-stone-900">Inspection History</h2>
                         <p className="text-xs text-stone-500 mt-1">
-                            {user ? `Logged in as: User ${user.uid.slice(0,6)}...` : "Connecting to History..."}
+                            {user ? `Logged in as: User ${user.uid.slice(0,6)}...` : "Offline Mode (History Unavailable)"}
                         </p>
                     </div>
                     <button 
-                        onClick={() => user && fetchHistory(user.uid)}
+                        onClick={() => user ? fetchHistory(user.uid) : notify("Connect to database to refresh", "error")}
                         className="p-2 text-stone-500 hover:text-stone-900 hover:bg-stone-200 rounded-full transition-colors"
                     >
-                        <RefreshCw className="w-4 h-4" />
+                        {user ? <RefreshCw className="w-4 h-4" /> : <WifiOff className="w-4 h-4" />}
                     </button>
                 </div>
                 
                 <div className="divide-y divide-stone-100">
+                    {!user && (
+                        <div className="p-6 bg-red-50 text-red-800 text-sm border-b border-red-100 flex items-center justify-center gap-2">
+                            <WifiOff className="w-4 h-4" />
+                            <span>Database connection missing. History features are disabled.</span>
+                        </div>
+                    )}
                     {historyItems.length === 0 ? (
                         <div className="p-12 text-center text-stone-400 flex flex-col items-center">
                             <History className="w-12 h-12 mb-3 opacity-20" />
@@ -850,7 +885,8 @@ export default function SiteWalkEnterprise() {
                                   className="flex items-center gap-2 px-3 py-2 rounded text-sm transition-colors border bg-white border-stone-300 text-stone-700 hover:bg-stone-50"
                                   title="Save to History"
                                 >
-                                  <Cloud className="w-4 h-4" /> <span className="hidden sm:inline">Save</span>
+                                  {isFirebaseReady ? <Cloud className="w-4 h-4" /> : <WifiOff className="w-4 h-4" />} 
+                                  <span className="hidden sm:inline">Save</span>
                                 </button>
 
                                 <button 
